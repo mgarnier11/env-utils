@@ -2,18 +2,27 @@ import {
   workspace,
   languages,
   window,
-  commands,
+  MarkdownString,
   ExtensionContext,
-  Disposable,
+  Hover,
   Position,
   Location,
   Uri,
+  TextEditor,
   ReferenceContext,
   TextDocument,
   CancellationToken,
+  DecorationOptions,
+  Range,
 } from 'vscode';
 
-const envVarRegex = /\${[A-Z_][A-Z0-9_]*}|\$[A-Z_][A-Z0-9_]*|\'[A-Z_][A-Z0-9_]*\'|\"[A-Z_][A-Z0-9_]*\"/;
+interface EnvVarData {
+  location: Location;
+  value: string;
+  name: string;
+}
+
+const envVarRegex = /\${[A-Z_][A-Z0-9_]*}|\$[A-Z_][A-Z0-9_]*|\'[A-Z_][A-Z0-9_]*\'|\"[A-Z_][A-Z0-9_]*\"/g;
 
 function extractEnvVarName(envVar: string): string {
   // Remove the surrounding ${}, $, '', or "" and return the variable name
@@ -24,9 +33,9 @@ function extractEnvVarName(envVar: string): string {
   return '';
 }
 
-async function findEnvVarLocationsInEnvFiles(envVarName: string): Promise<Location[]> {
+async function findEnvVarDatas(envVarName: string): Promise<EnvVarData[]> {
   const files = await workspace.findFiles('**/*.{env}', '**/node_modules/**');
-  const locations: Location[] = [];
+  const locations: EnvVarData[] = [];
 
   for (const file of files) {
     const doc = await workspace.openTextDocument(file);
@@ -39,18 +48,55 @@ async function findEnvVarLocationsInEnvFiles(envVarName: string): Promise<Locati
       // Find the line number of the match
       const index = match.index;
       const pos = doc.positionAt(index ?? 0);
-      locations.push(new Location(file, pos));
+      const value = match[1].trim();
+      locations.push({
+        location: new Location(file, pos),
+        value,
+        name: envVarName,
+      });
     }
   }
 
   return locations;
 }
 
+const decorationType = window.createTextEditorDecorationType({
+  after: {
+    color: '#888',
+    margin: '0 0 0 1em',
+  },
+});
+
+async function updateDecorations(editor: TextEditor | undefined) {
+  if (!editor) return;
+  const text = editor.document.getText();
+  const decorations: DecorationOptions[] = [];
+
+  for (const match of text.matchAll(envVarRegex)) {
+    const envVar = match[0];
+    const envVarName = extractEnvVarName(envVar);
+    const envVarDatas = await findEnvVarDatas(envVarName);
+    if (envVarDatas.length === 0) continue;
+    const value = envVarDatas[0].value;
+    const start = editor.document.positionAt(match.index ?? 0);
+    const end = editor.document.positionAt((match.index ?? 0) + envVar.length);
+    decorations.push({
+      range: new Range(start, end),
+      renderOptions: {
+        after: {
+          contentText: `${value}`,
+        },
+      },
+    });
+  }
+  editor.setDecorations(decorationType, decorations);
+}
+
 export function activate(context: ExtensionContext) {
   console.log('Congratulations, your extension "env-utils" is now active!');
   let disposable = languages.registerDefinitionProvider(['*'], {
     async provideDefinition(document, position, token) {
-      console.log('provideDefinition called 2');
+      console.log('provideDefinition called');
       const range = document.getWordRangeAtPosition(position, envVarRegex);
 
       if (!range) return undefined;
@@ -58,9 +104,11 @@ export function activate(context: ExtensionContext) {
       const envVar = document.getText(range);
       const envVarName = extractEnvVarName(envVar);
 
-      const locations = await findEnvVarLocationsInEnvFiles(envVarName);
+      console.log(`envVarName: ${envVarName}`);
 
-      return locations.length > 0 ? locations[0] : undefined;
+      const envVarDatas = await findEnvVarDatas(envVarName);
+
+      return envVarDatas.length > 0 ? envVarDatas[0].location : undefined;
     },
   });
 
@@ -77,15 +125,45 @@ export function activate(context: ExtensionContext) {
       const envVar = document.getText(range);
       const envVarName = extractEnvVarName(envVar);
 
-      console.log('envVar2:', envVar);
+      const envVarDatas = await findEnvVarDatas(envVarName);
 
-      const envFilesLocations = await findEnvVarLocationsInEnvFiles(envVarName);
-
-      return [...envFilesLocations];
+      return [...envVarDatas.map((data) => data.location)];
     },
   });
 
-  context.subscriptions.push(disposable, refDisposable);
+  // Register HoverProvider
+  let hoverDisposable = languages.registerHoverProvider(['*'], {
+    async provideHover(document, position, token) {
+      const range = document.getWordRangeAtPosition(position, envVarRegex);
+      if (!range) return;
+      const envVar = document.getText(range);
+      const envVarName = extractEnvVarName(envVar);
+
+      const envVarDatas = await findEnvVarDatas(envVarName);
+
+      if (envVarDatas.length === 0) return;
+
+      const envVarData = envVarDatas[0];
+      return new Hover(new MarkdownString(`**Value:** \`${envVarData.value}\``), range);
+    },
+  });
+
+  // Update decorations on editor change or document change
+  window.onDidChangeActiveTextEditor((editor) => updateDecorations(editor), null, context.subscriptions);
+  workspace.onDidChangeTextDocument(
+    (event) => {
+      if (window.activeTextEditor && event.document === window.activeTextEditor.document) {
+        updateDecorations(window.activeTextEditor);
+      }
+    },
+    null,
+    context.subscriptions
+  );
+
+  // Update decorations for the active editor on extension activation
+  updateDecorations(window.activeTextEditor);
+
+  context.subscriptions.push(disposable, refDisposable, hoverDisposable, decorationType);
 }
 
 // This method is called when your extension is deactivated
