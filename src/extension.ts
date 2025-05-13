@@ -1,3 +1,4 @@
+import path from 'node:path';
 import {
   workspace,
   languages,
@@ -14,6 +15,7 @@ import {
   CancellationToken,
   DecorationOptions,
   Range,
+  RelativePattern,
 } from 'vscode';
 
 interface EnvVarData {
@@ -24,46 +26,104 @@ interface EnvVarData {
 
 const envVarRegex = /\${[A-Z_][A-Z0-9_]*}|\$[A-Z_][A-Z0-9_]*|\'[A-Z_][A-Z0-9_]*\'|\"[A-Z_][A-Z0-9_]*\"/g;
 
-function extractEnvVarName(envVar: string): string {
-  // Remove the surrounding ${}, $, '', or "" and return the variable name
-  const match = envVar.match(envVarRegex);
-  if (match) {
-    return match[0].replace(/^\${|^\$|^\'|^\"|\'$|\"$/g, '');
+let envVarCache: Map<string, EnvVarData[]> = new Map();
+
+async function rebuildEnvVarCache() {
+  console.time('rebuildEnvVarCache');
+
+  const config = workspace.getConfiguration('envUtils');
+  const ignoreFolders: string[] = config.get('ignoreFolders') || ['**/node_modules/**'];
+  const ignoreWorkspaceFolders: string[] = config.get('ignoreWorkspaceFolders') || ['docker-data'];
+
+  envVarCache.clear();
+  const workspaceFolders =
+    workspace.workspaceFolders?.filter((folder) => !ignoreWorkspaceFolders.includes(folder.name)) || [];
+
+  for (const folder of workspaceFolders) {
+    console.time(`Searching in workspace folder: ${folder.name}`);
+    const envFileGlob = new RelativePattern(folder, '**/*.env');
+    const envFiles = await workspace.findFiles(envFileGlob, `{${ignoreFolders.join(',')}}`);
+    console.timeEnd(`Searching in workspace folder: ${folder.name}`);
+
+    console.log(`Found ${envFiles.length} env files in workspace folder ${folder.name}`);
+
+    await Promise.all(
+      envFiles.map(async (file) => {
+        console.log(`Processing file: ${file.fsPath}`);
+        const doc = await workspace.openTextDocument(file);
+        const text = doc.getText();
+        const lines = text.split('\n');
+
+        for (const line of lines) {
+          const match = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
+          if (match) {
+            const [_, name, value] = match;
+            const pos = new Position(lines.indexOf(line), 0);
+            const data: EnvVarData = {
+              location: new Location(file, pos),
+              value: value.trim(),
+              name,
+            };
+            if (!envVarCache.has(name)) envVarCache.set(name, []);
+            envVarCache.get(name)!.push(data);
+          }
+        }
+      })
+    );
   }
-  return '';
+
+  console.log(`Env var cache rebuilt with ${envVarCache.size} entries`);
+  console.timeEnd('rebuildEnvVarCache');
 }
 
-async function findEnvVarDatas(envVarName: string): Promise<EnvVarData[]> {
-  const files = await workspace.findFiles('**/*.{env}', '**/node_modules/**');
-  const locations: EnvVarData[] = [];
-
-  for (const file of files) {
-    const doc = await workspace.openTextDocument(file);
-    const text = doc.getText();
-
-    const regex = new RegExp(`^${envVarName}=(.*)$`, 'm');
-    const match = text.match(regex);
-
-    if (match) {
-      // Find the line number of the match
-      const index = match.index;
-      const pos = doc.positionAt(index ?? 0);
-      const value = match[1].trim();
-      locations.push({
-        location: new Location(file, pos),
-        value,
-        name: envVarName,
-      });
-    }
+function extractEnvVarName(envVar: string): string {
+  // Remove ${...}, $..., '...', or "..."
+  let name = envVar.trim();
+  // Remove ${...}
+  if (name.startsWith('${') && name.endsWith('}')) {
+    name = name.slice(2, -1);
   }
+  // Remove quotes
+  if ((name.startsWith("'") && name.endsWith("'")) || (name.startsWith('"') && name.endsWith('"'))) {
+    name = name.slice(1, -1);
+  }
+  // Remove leading $
+  if (name.startsWith('$')) {
+    name = name.slice(1);
+  }
+  return name;
+}
 
-  return locations;
+async function findEnvVarDatas(envVarName: string, baseUri?: Uri): Promise<EnvVarData[]> {
+  const envVarDatas = envVarCache.get(envVarName) || [];
+  if (!baseUri || envVarDatas.length <= 1) return envVarDatas;
+
+  const baseDir = path.dirname(baseUri.fsPath);
+
+  // Compute a "distance" score for each env var location
+  const scored = envVarDatas.map((data) => {
+    const varDir = path.dirname(data.location.uri.fsPath);
+    const rel = path.relative(baseDir, varDir);
+    // Split the relative path and count segments (ignoring '.' for same dir)
+    const segments = rel === '' ? [] : rel.split(path.sep);
+    // Score: number of segments, with '..' (parent) segments weighted higher
+    let score = 0;
+    for (const seg of segments) {
+      if (seg === '..') score += 2; // parent dirs are "further"
+      else score += 1; // subdirs are "closer" than parent dirs
+    }
+    return { data, score };
+  });
+
+  scored.sort((a, b) => a.score - b.score);
+
+  return scored.map((s) => s.data);
 }
 
 const decorationType = window.createTextEditorDecorationType({
   after: {
     color: '#888',
-    margin: '0 0 0 1em',
+    margin: '-20 0 0 1em',
   },
 });
 
@@ -78,13 +138,14 @@ async function updateDecorations(editor: TextEditor | undefined) {
     const envVarDatas = await findEnvVarDatas(envVarName);
     if (envVarDatas.length === 0) continue;
     const value = envVarDatas[0].value;
+    const sanitizedValue = value.replace(/^[\'\"]|[\'\"]$/g, '');
     const start = editor.document.positionAt(match.index ?? 0);
     const end = editor.document.positionAt((match.index ?? 0) + envVar.length);
     decorations.push({
       range: new Range(start, end),
       renderOptions: {
         after: {
-          contentText: `${value}`,
+          contentText: `${sanitizedValue}`,
         },
       },
     });
@@ -94,6 +155,8 @@ async function updateDecorations(editor: TextEditor | undefined) {
 
 export function activate(context: ExtensionContext) {
   console.log('Congratulations, your extension "env-utils" is now active!');
+  rebuildEnvVarCache();
+
   let disposable = languages.registerDefinitionProvider(['*'], {
     async provideDefinition(document, position, token) {
       console.log('provideDefinition called');
@@ -106,7 +169,7 @@ export function activate(context: ExtensionContext) {
 
       console.log(`envVarName: ${envVarName}`);
 
-      const envVarDatas = await findEnvVarDatas(envVarName);
+      const envVarDatas = await findEnvVarDatas(envVarName, document.uri);
 
       return envVarDatas.length > 0 ? envVarDatas[0].location : undefined;
     },

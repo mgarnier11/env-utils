@@ -23,7 +23,32 @@
     "onLanguage:go"
   ],
   "main": "./dist/extension.js",
-  "contributes": {},
+  "contributes": {
+    "configuration": {
+      "properties": {
+        "envUtils.ignoreFolders": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/node_modules/**"
+          ],
+          "description": "Glob patterns for folders to ignore when searching for .env files."
+        },
+        "envUtils.ignoreWorkspaceFolders": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "docker-data"
+          ],
+          "description": "Name of the workspace folders to ignore when searching for .env files."
+        }
+      }
+    }
+  },
   "scripts": {
     "vscode:prepublish": "pnpm run package",
     "compile": "pnpm run check-types && pnpm run lint && node esbuild.js",
