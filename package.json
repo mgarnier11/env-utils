@@ -4,7 +4,7 @@
   "description": "",
   "repository": "https://github.com/mgarnier11/env-utils",
   "publisher": "mgarnier11",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "engines": {
     "vscode": "^1.100.0"
   },
