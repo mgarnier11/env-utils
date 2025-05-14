@@ -24,7 +24,8 @@ interface EnvVarData {
   name: string;
 }
 
-const envVarRegex = /\${[A-Z_][A-Z0-9_]*}|\$[A-Z_][A-Z0-9_]*|\'[A-Z_][A-Z0-9_]*\'|\"[A-Z_][A-Z0-9_]*\"/g;
+const envVarRegex =
+  /\${[A-Z_][A-Z0-9_]*}|\$[A-Z_][A-Z0-9_]*|\'[A-Z_][A-Z0-9_]*\'|\"[A-Z_][A-Z0-9_]*\"|process\.env\.([A-Z_][A-Z0-9_]*)/g;
 
 let envVarCache: Map<string, EnvVarData[]> = new Map();
 
@@ -79,6 +80,9 @@ async function rebuildEnvVarCache() {
 function extractEnvVarName(envVar: string): string {
   // Remove ${...}, $..., '...', or "..."
   let name = envVar.trim();
+  if (name.startsWith('process.env.')) {
+    name = name.slice('process.env.'.length);
+  }
   // Remove ${...}
   if (name.startsWith('${') && name.endsWith('}')) {
     name = name.slice(2, -1);
