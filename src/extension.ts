@@ -161,7 +161,7 @@ export function activate(context: ExtensionContext) {
   console.log('Congratulations, your extension "env-utils" is now active!');
   rebuildEnvVarCache();
 
-  let disposable = languages.registerDefinitionProvider(['*'], {
+  const definitionProviderDisposable = languages.registerDefinitionProvider(['*'], {
     async provideDefinition(document, position, token) {
       console.log('provideDefinition called');
       const range = document.getWordRangeAtPosition(position, envVarRegex);
@@ -180,7 +180,7 @@ export function activate(context: ExtensionContext) {
   });
 
   // Register ReferenceProvider
-  let refDisposable = languages.registerReferenceProvider(['*'], {
+  const referenceProdiverDisposable = languages.registerReferenceProvider(['*'], {
     async provideReferences(
       document: TextDocument,
       position: Position,
@@ -199,7 +199,7 @@ export function activate(context: ExtensionContext) {
   });
 
   // Register HoverProvider
-  let hoverDisposable = languages.registerHoverProvider(['*'], {
+  const hoverProviderDisposable = languages.registerHoverProvider(['*'], {
     async provideHover(document, position, token) {
       const range = document.getWordRangeAtPosition(position, envVarRegex);
       if (!range) return;
@@ -216,21 +216,32 @@ export function activate(context: ExtensionContext) {
   });
 
   // Update decorations on editor change or document change
-  window.onDidChangeActiveTextEditor((editor) => updateDecorations(editor), null, context.subscriptions);
-  workspace.onDidChangeTextDocument(
-    (event) => {
-      if (window.activeTextEditor && event.document === window.activeTextEditor.document) {
-        updateDecorations(window.activeTextEditor);
-      }
-    },
-    null,
-    context.subscriptions
-  );
+  const didChangeActiveTextEditorDisposable = window.onDidChangeActiveTextEditor((editor) => updateDecorations(editor));
+  const didChangeTextDocumentDisposable = workspace.onDidChangeTextDocument((event) => {
+    if (window.activeTextEditor && event.document === window.activeTextEditor.document) {
+      updateDecorations(window.activeTextEditor);
+    }
+  });
+
+  // Rebuild cache on env file save
+  const didSaveTextDocumentDisposable = workspace.onDidSaveTextDocument((document) => {
+    if (/\.env$/i.test(document.uri.fsPath)) {
+      console.log(`Rebuilding cache after saving ${document.uri.fsPath}`);
+      rebuildEnvVarCache();
+    }
+  });
 
   // Update decorations for the active editor on extension activation
   updateDecorations(window.activeTextEditor);
 
-  context.subscriptions.push(disposable, refDisposable, hoverDisposable, decorationType);
+  context.subscriptions.push(
+    definitionProviderDisposable,
+    referenceProdiverDisposable,
+    hoverProviderDisposable,
+    didChangeActiveTextEditorDisposable,
+    didChangeTextDocumentDisposable,
+    didSaveTextDocumentDisposable
+  );
 }
 
 // This method is called when your extension is deactivated
